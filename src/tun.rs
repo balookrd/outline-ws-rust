@@ -100,6 +100,7 @@ pub async fn spawn_tun_loop(config: TunConfig, uplinks: UplinkManager) -> Result
         uplinks.clone(),
         max_flows,
         idle_timeout,
+        tun_mtu,
         config.tcp.clone(),
     );
     metrics::set_tun_config(max_flows, idle_timeout);
@@ -647,6 +648,7 @@ fn spawn_flow_cleanup_loop(flows: FlowTable, idle_timeout: Duration) {
 
 impl SharedTunWriter {
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn new(file: File) -> Self {
         Self {
             inner: Arc::new(Mutex::new(file)),

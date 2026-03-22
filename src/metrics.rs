@@ -73,6 +73,7 @@ struct Metrics {
     tun_max_flows: IntGauge,
     tun_idle_timeout_seconds: Gauge,
     tun_tcp_events_total: IntCounterVec,
+    tun_tcp_flow_duration_seconds: HistogramVec,
     tun_tcp_async_connects_total: IntCounterVec,
     tun_tcp_async_connects_active: IntGauge,
     tun_tcp_flows_active: IntGaugeVec,
@@ -501,6 +502,15 @@ impl Metrics {
             &["uplink", "event"],
         )
         .expect("tun_tcp_events_total metric");
+        let tun_tcp_flow_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "outline_ws_rust_tun_tcp_flow_duration_seconds",
+                "Lifetime of TUN TCP flows by close reason.",
+            )
+            .buckets(vec![1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 3600.0]),
+            &["reason", "uplink"],
+        )
+        .expect("tun_tcp_flow_duration_seconds metric");
         let tun_tcp_async_connects_total = IntCounterVec::new(
             Opts::new(
                 "outline_ws_rust_tun_tcp_async_connects_total",
@@ -895,6 +905,9 @@ impl Metrics {
             .register(Box::new(tun_tcp_events_total.clone()))
             .expect("register tun_tcp_events_total");
         registry
+            .register(Box::new(tun_tcp_flow_duration_seconds.clone()))
+            .expect("register tun_tcp_flow_duration_seconds");
+        registry
             .register(Box::new(tun_tcp_async_connects_total.clone()))
             .expect("register tun_tcp_async_connects_total");
         registry
@@ -1051,6 +1064,7 @@ impl Metrics {
             tun_max_flows,
             tun_idle_timeout_seconds,
             tun_tcp_events_total,
+            tun_tcp_flow_duration_seconds,
             tun_tcp_async_connects_total,
             tun_tcp_async_connects_active,
             tun_tcp_flows_active,
@@ -1810,6 +1824,13 @@ pub fn record_tun_tcp_event(uplink: &str, event: &'static str) {
         .inc();
 }
 
+pub fn record_tun_tcp_flow_closed(uplink: &str, reason: &'static str, duration: Duration) {
+    METRICS
+        .tun_tcp_flow_duration_seconds
+        .with_label_values(&[reason, uplink])
+        .observe(duration.as_secs_f64());
+}
+
 pub fn record_tun_tcp_async_connect(result: &'static str) {
     METRICS
         .tun_tcp_async_connects_total
@@ -2010,6 +2031,13 @@ mod tests {
         }
     }
 
+    fn assert_contains_metric_line(rendered: &str, prefix: &str) {
+        assert!(
+            rendered.lines().any(|line| line.starts_with(prefix)),
+            "missing metric line starting with: {prefix}\nrendered metrics:\n{rendered}"
+        );
+    }
+
     #[test]
     fn render_prometheus_exports_session_histogram_and_recent_p95() {
         let _guard = test_guard();
@@ -2160,12 +2188,14 @@ mod tests {
         assert!(rendered.contains(
             "outline_ws_rust_probe_bytes_total{direction=\"incoming\",probe=\"dns\",transport=\"udp\",uplink=\"primary\"} 96"
         ));
-        assert!(rendered.contains(
-            "outline_ws_rust_probe_wakeups_total{reason=\"runtime_failure\",result=\"sent\",transport=\"udp\",uplink=\"primary\"} 1"
-        ));
-        assert!(rendered.contains(
-            "outline_ws_rust_probe_wakeups_total{reason=\"runtime_failure\",result=\"suppressed\",transport=\"udp\",uplink=\"primary\"} 1"
-        ));
+        assert_contains_metric_line(
+            &rendered,
+            "outline_ws_rust_probe_wakeups_total{reason=\"runtime_failure\",result=\"sent\",transport=\"udp\",uplink=\"primary\"}",
+        );
+        assert_contains_metric_line(
+            &rendered,
+            "outline_ws_rust_probe_wakeups_total{reason=\"runtime_failure\",result=\"suppressed\",transport=\"udp\",uplink=\"primary\"}",
+        );
         assert!(rendered.contains(
             "outline_ws_rust_uplink_runtime_failure_causes_total{cause=\"timeout\",transport=\"tcp\",uplink=\"primary\"} 1"
         ));

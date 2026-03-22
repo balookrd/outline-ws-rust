@@ -294,6 +294,13 @@ impl UplinkManager {
         self.refill_all_standby().await;
     }
 
+    pub async fn run_startup_maintenance(&self) {
+        if self.inner.probe.enabled() {
+            self.probe_all().await;
+        }
+        self.refill_all_standby().await;
+    }
+
     pub fn uplinks(&self) -> &[Arc<UplinkConfig>] {
         &self.inner.uplinks
     }

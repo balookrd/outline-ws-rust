@@ -47,6 +47,7 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
         config.probe.clone(),
         config.load_balancing.clone(),
     )?;
+    uplinks.run_startup_maintenance().await;
     uplinks.spawn_probe_loop();
     uplinks.spawn_warm_standby_loop();
     uplinks.spawn_standby_keepalive_loop();

@@ -10,7 +10,7 @@ It supports:
 - WebSocket-over-HTTP/1.1, RFC 8441 (`ws-over-h2`), and RFC 9220 (`ws-over-h3`)
 - Prometheus metrics and packaged Grafana dashboards
 - existing TUN device integration for `tun2udp`
-- stateful `tun2tcp` relay with production-oriented guardrails
+- `smoltcp`-based `tun2tcp` relay with production-oriented guardrails
 
 ---
 
@@ -24,7 +24,7 @@ At a high level, the process does five jobs:
 2. Selects the best available uplink using health probes, EWMA RTT scoring, sticky routing, hysteresis, penalties, and warm standby.
 3. Connects to an Outline WebSocket transport using the requested mode (`http1`, `h2`, or `h3`) with automatic fallback.
 4. Encrypts payloads using Shadowsocks AEAD before sending them upstream.
-5. Exposes Prometheus metrics for runtime, uplink, probe, TUN, and `tun2tcp` behavior.
+5. Exposes Prometheus metrics for runtime, uplink, probe, TUN, and `tun2tcp` flow lifecycle / transport behavior.
 
 ## Architecture
 
@@ -145,7 +145,7 @@ tun2udp + tun2tcp"]
 
 - existing TUN device integration only
 - `tun2udp` with flow lifecycle management and local ICMP echo replies
-- stateful `tun2tcp` relay with retransmit, zero-window persist/backoff, SACK-aware receive/send behavior, adaptive RTO, and bounded buffering
+- `smoltcp`-based `tun2tcp` relay integrated with existing uplink selection, failover, and transport metrics
 
 ### Operations
 
@@ -161,7 +161,7 @@ tun2udp + tun2tcp"]
 The project is intentionally practical, but there are still boundaries:
 
 - Shadowsocks 2022 is not implemented.
-- `tun2tcp` is production-oriented but still not a kernel-equivalent TCP stack.
+- `tun2tcp` uses a userspace `smoltcp` stack and is still not a kernel-equivalent TCP implementation.
 - IPv4 fragments, IPv6 extension-header paths, and non-echo ICMP traffic on TUN are not supported.
 - HTTP probe supports `http://` today, not `https://`.
 - TCP failover is safe before useful payload exchange; live established TCP tunnels cannot be migrated transparently between uplinks.
@@ -171,7 +171,7 @@ The project is intentionally practical, but there are still boundaries:
 - [`config.toml`](/Users/mmalykhin/Documents/Playground/config.toml) - example configuration
 - [`systemd/outline-ws-rust.service`](/Users/mmalykhin/Documents/Playground/systemd/outline-ws-rust.service) - hardened systemd unit
 - [`grafana/outline-ws-rust-dashboard.json`](/Users/mmalykhin/Documents/Playground/grafana/outline-ws-rust-dashboard.json) - main operational dashboard
-- [`grafana/outline-ws-rust-tun-tcp-dashboard.json`](/Users/mmalykhin/Documents/Playground/grafana/outline-ws-rust-tun-tcp-dashboard.json) - `tun2tcp` dashboard
+- [`grafana/outline-ws-rust-tun-tcp-dashboard.json`](/Users/mmalykhin/Documents/Playground/grafana/outline-ws-rust-tun-tcp-dashboard.json) - `tun2tcp` dashboard for active flows, connects, lifecycle events, and throughput
 - `grafana/outline-ws-rust-native-burst-dashboard.json` - startup and traffic-switch burst diagnostics for native Shadowsocks mode
 - [`prometheus/outline-ws-rust-alerts.yml`](/Users/mmalykhin/Documents/Playground/prometheus/outline-ws-rust-alerts.yml) - Prometheus alert rules
 - [`PATCHES.md`](/Users/mmalykhin/Documents/Playground/PATCHES.md) - local vendored patch inventory
@@ -275,12 +275,6 @@ listen = "[::1]:9090"
 # handshake_timeout_secs = 15
 # half_close_timeout_secs = 60
 # max_pending_server_bytes = 4194304
-# backlog_abort_grace_secs = 3
-# backlog_hard_limit_multiplier = 2
-# backlog_no_progress_abort_secs = 8
-# max_buffered_client_segments = 4096
-# max_buffered_client_bytes = 262144
-# max_retransmits = 12
 
 [probe]
 interval_secs = 30
@@ -537,18 +531,15 @@ Capabilities:
 
 Capabilities:
 
-- stateful userspace TCP relay over Outline TCP uplinks
-- SYN / SYN-ACK / FIN / RST handling
-- out-of-order buffering
-- receive-window enforcement
-- SACK-aware receive/send logic
-- adaptive RTO
-- zero-window persist/backoff
-- bounded buffering and retransmit budgets
-- flow termination on timeout, overflow, or relay failure
-- transport-error reporting to the uplink penalty system: abrupt upstream closes (e.g. QUIC `APPLICATION_CLOSE` / `H3_INTERNAL_ERROR`) are forwarded to `report_runtime_failure`, so the H3→H2 downgrade and failure penalty apply to TUN TCP flows the same way they apply to SOCKS5 flows; clean WebSocket closes (FIN or Close frame) are not counted as failures
+- userspace TCP relay built on top of a virtual `smoltcp` IP interface
+- existing TUN packets are injected into the `smoltcp` stack and bridged into the selected Outline / direct Shadowsocks TCP uplink
+- TCP flow creation on SYN, normal close propagation, and idle cleanup
+- the same uplink selection, warm-standby, H3 downgrade, and runtime failover logic used by SOCKS5 TCP
+- bounded connection setup and half-close timeouts
+- flow-level lifecycle metrics (`created`, `connected`, `closed`, `finished`, `connect_failed`, `io_error`, `evicted`)
+- transport-error reporting to the uplink penalty system: abrupt upstream closes (e.g. QUIC `APPLICATION_CLOSE` / `H3_INTERNAL_ERROR`) are forwarded to `report_runtime_failure`, so the H3→H2 downgrade and failure penalty apply to TUN TCP flows the same way they apply to SOCKS5 flows; clean closes are not counted as failures
 
-This is intended for real operations, but it is still not equivalent to a kernel TCP stack.
+This path is intended for real operations, but it is still a userspace TCP implementation rather than a kernel TCP stack.
 
 ## Linux fwmark
 
@@ -603,7 +594,7 @@ Metrics include:
 - probe results and latency
 - warm-standby acquire and refill outcomes
 - TUN flow and packet metrics
-- `tun2tcp` retransmit, backlog, window, RTT, and RTO metrics
+- `tun2tcp` active flows, async connect, lifecycle event, upstream transport, and throughput metrics
 
 On Linux, the process memory sampler updates:
 
@@ -675,9 +666,24 @@ Traffic panels on the main dashboard now break payload throughput down by `uplin
 The `tun2tcp` dashboard is grouped into:
 
 - Overview
-- Recovery & Loss
-- Backlog & Flow State
-- Timing & Window Control
+- Lifecycle
+- Traffic
+
+It focuses on the metrics that are meaningful for the current `smoltcp`-based path:
+
+- active flows by uplink and pending handshakes
+- async upstream connect pressure and outcomes
+- lifecycle event rates (`created`, `connected`, `closed`, `finished`, `connect_failed`, `io_error`, `evicted`)
+- underlying transport connect/open/close activity
+- TCP throughput by uplink
+
+The packaged alert rules for `tun2tcp` now cover:
+
+- stuck pending handshakes
+- elevated upstream connect failures
+- elevated runtime I/O failures
+- flow evictions
+- elevated async connect errors
 
 Both dashboards use a shared color language: blue for traffic and baseline timing, amber for pressure or degraded latency, red for failures and loss, and green for healthy capacity or successful standby behavior.
 Legends also use a shared ordering convention: `instance`, then `uplink` when present, then the metric or event name. The `instance` label is shortened to the part before the first dot to keep legends compact.

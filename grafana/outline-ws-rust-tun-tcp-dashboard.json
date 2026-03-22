@@ -45,170 +45,13 @@
             "mode": "palette-classic"
           },
           "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#1F78C1",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
+        }
       },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
         "y": 1
-      },
-      "id": 8,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_flows_active{job=~\"$job\",instance=~\"$instance\"})), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} active tcp flows",
-          "refId": "A"
-        }
-      ],
-      "title": "Active TCP Flows",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#C15C17",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 1
-      },
-      "id": 9,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "label_replace((max by (instance) (outline_ws_rust_tun_tcp_async_connects_active{job=~\"$job\",instance=~\"$instance\"})), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} async connects",
-          "refId": "A"
-        }
-      ],
-      "title": "Async Upstream Connects",
-      "type": "timeseries"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 9
-      },
-      "id": 102,
-      "panels": [],
-      "title": "Recovery & Loss",
-      "type": "row"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "pps"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* fast_retransmit$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#FF9830",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* timeout_retransmit$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#C15C17",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 10
       },
       "id": 1,
       "options": {
@@ -222,12 +65,113 @@
       },
       "targets": [
         {
-          "expr": "label_replace((sum by (instance, uplink, event) (rate(outline_ws_rust_tun_tcp_events_total{job=~\"$job\",instance=~\"$instance\",event=~\"fast_retransmit|timeout_retransmit\"}[$__rate_interval]))), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "expr": "label_replace(sum by (instance, uplink) (outline_ws_rust_tun_tcp_flows_active{job=~\"$job\",instance=~\"$instance\",uplink!=\"pending\"}), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "legendFormat": "{{instance_short}} {{uplink}} active flows",
+          "refId": "A"
+        },
+        {
+          "expr": "label_replace(sum by (instance) (outline_ws_rust_tun_tcp_flows_active{job=~\"$job\",instance=~\"$instance\",uplink=\"pending\"}), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "legendFormat": "{{instance_short}} pending handshakes",
+          "refId": "B"
+        }
+      ],
+      "title": "Active Flows",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "label_replace(max by (instance) (outline_ws_rust_tun_tcp_async_connects_active{job=~\"$job\",instance=~\"$instance\"}), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "legendFormat": "{{instance_short}} async connects",
+          "refId": "A"
+        },
+        {
+          "expr": "label_replace(sum by (instance, protocol) (outline_ws_rust_upstream_transports_active{job=~\"$job\",instance=~\"$instance\",source=\"tun_tcp\"}), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "legendFormat": "{{instance_short}} upstream {{protocol}} transports",
+          "refId": "B"
+        }
+      ],
+      "title": "Connect Pressure and Open Transports",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "id": 102,
+      "panels": [],
+      "title": "Lifecycle",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "pps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "label_replace(sum by (instance, uplink, event) (rate(outline_ws_rust_tun_tcp_events_total{job=~\"$job\",instance=~\"$instance\",event=~\"created|connected|closed\"}[$__rate_interval])), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
           "legendFormat": "{{instance_short}} {{uplink}} {{event}}",
           "refId": "A"
         }
       ],
-      "title": "Retransmits",
+      "title": "Flow Lifecycle Events",
       "type": "timeseries"
     },
     {
@@ -241,84 +185,7 @@
             "mode": "palette-classic"
           },
           "unit": "pps"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* connected$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#299C46",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* cancelled$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#EAB839",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* failed$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#C15C17",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* timeout$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#FF9830",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* discarded_closed_flow$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#1F78C1",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
+        }
       },
       "gridPos": {
         "h": 8,
@@ -326,7 +193,7 @@
         "x": 12,
         "y": 10
       },
-      "id": 10,
+      "id": 4,
       "options": {
         "legend": {
           "displayMode": "table",
@@ -338,7 +205,46 @@
       },
       "targets": [
         {
-          "expr": "label_replace((sum by (instance, result) (rate(outline_ws_rust_tun_tcp_async_connects_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "expr": "label_replace(sum by (instance, uplink, event) (rate(outline_ws_rust_tun_tcp_events_total{job=~\"$job\",instance=~\"$instance\",event=~\"finished|connect_failed|io_error|evicted\"}[$__rate_interval])), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "legendFormat": "{{instance_short}} {{uplink}} {{event}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Flow Closures by Reason",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "pps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "label_replace(sum by (instance, result) (rate(outline_ws_rust_tun_tcp_async_connects_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
           "legendFormat": "{{instance_short}} {{result}}",
           "refId": "A"
         }
@@ -357,297 +263,13 @@
             "mode": "palette-classic"
           },
           "unit": "pps"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* window_stall$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#EAB839",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* zero_window_probe$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#FADE2A",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* deferred_fin_sent$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#1F78C1",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
+        }
       },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 10
-      },
-      "id": 2,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "label_replace((sum by (instance, uplink, event) (rate(outline_ws_rust_tun_tcp_events_total{job=~\"$job\",instance=~\"$instance\",event=~\"window_stall|zero_window_probe|deferred_fin_sent\"}[$__rate_interval]))), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} {{event}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Window Pressure and FIN Lifecycle",
-      "type": "timeseries"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
         "y": 18
-      },
-      "id": 103,
-      "panels": [],
-      "title": "Backlog & Flow State",
-      "type": "row"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#1F78C1",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 19
-      },
-      "id": 3,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_inflight_segments{job=~\"$job\",instance=~\"$instance\"})), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} inflight segments",
-          "refId": "A"
-        }
-      ],
-      "title": "In-Flight Segments",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "bytes"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#33A02C",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 19
-      },
-      "id": 4,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_inflight_bytes{job=~\"$job\",instance=~\"$instance\"})), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} inflight bytes",
-          "refId": "A"
-        }
-      ],
-      "title": "In-Flight Bytes",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "bytes"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#EAB839",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 19
-      },
-      "id": 5,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_pending_server_bytes{job=~\"$job\",instance=~\"$instance\"})), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} pending server bytes",
-          "refId": "A"
-        }
-      ],
-      "title": "Pending Server Bytes",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#6ED0E0",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 27
       },
       "id": 6,
       "options": {
@@ -661,12 +283,12 @@
       },
       "targets": [
         {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_buffered_client_segments{job=~\"$job\",instance=~\"$instance\"})), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} buffered client segments",
+          "expr": "label_replace(sum by (instance, mode, result) (rate(outline_ws_rust_transport_connects_total{job=~\"$job\",instance=~\"$instance\",source=\"tun_tcp\"}[$__rate_interval])), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "legendFormat": "{{instance_short}} {{mode}} {{result}}",
           "refId": "A"
         }
       ],
-      "title": "Buffered Client Segments",
+      "title": "Underlying Transport Connects",
       "type": "timeseries"
     },
     {
@@ -675,11 +297,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 26
       },
-      "id": 104,
+      "id": 103,
       "panels": [],
-      "title": "Timing & Window Control",
+      "title": "Traffic",
       "type": "row"
     },
     {
@@ -692,107 +314,14 @@
           "color": {
             "mode": "palette-classic"
           },
-          "unit": "s"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* srtt$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#1F78C1",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* rto$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#EAB839",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
+          "unit": "Bps"
+        }
       },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 36
-      },
-      "id": 10,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_smoothed_rtt_seconds{job=~\"$job\",instance=~\"$instance\"}) / clamp_min(sum by (instance, uplink) (outline_ws_rust_tun_tcp_flows_active{job=~\"$job\",instance=~\"$instance\"}), 1)), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} srtt",
-          "refId": "A"
-        },
-        {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_retransmission_timeout_seconds{job=~\"$job\",instance=~\"$instance\"}) / clamp_min(sum by (instance, uplink) (outline_ws_rust_tun_tcp_flows_active{job=~\"$job\",instance=~\"$instance\"}), 1)), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} rto",
-          "refId": "B"
-        }
-      ],
-      "title": "RTT and Retransmit Timeout",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#FADE2A",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 36
+        "y": 27
       },
       "id": 7,
       "options": {
@@ -806,12 +335,51 @@
       },
       "targets": [
         {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_zero_window_flows{job=~\"$job\",instance=~\"$instance\"})), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} zero-window flows",
+          "expr": "label_replace(sum by (instance, uplink) (rate(outline_ws_rust_bytes_total{job=~\"$job\",instance=~\"$instance\",protocol=\"tcp\",direction=\"client_to_upstream\"}[$__rate_interval])), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "legendFormat": "{{instance_short}} {{uplink}} upload",
           "refId": "A"
         }
       ],
-      "title": "Zero-Window Flows",
+      "title": "Client to Upstream TCP Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "Bps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "label_replace(sum by (instance, uplink) (rate(outline_ws_rust_bytes_total{job=~\"$job\",instance=~\"$instance\",protocol=\"tcp\",direction=\"upstream_to_client\"}[$__rate_interval])), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "legendFormat": "{{instance_short}} {{uplink}} download",
+          "refId": "A"
+        }
+      ],
+      "title": "Upstream to Client TCP Throughput",
       "type": "timeseries"
     },
     {
@@ -825,269 +393,13 @@
             "mode": "palette-classic"
           },
           "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#C15C17",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
+        }
       },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 44
-      },
-      "id": 11,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_backlog_pressure_flows{job=~\"$job\",instance=~\"$instance\"})), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} backlog pressure flows",
-          "refId": "A"
-        }
-      ],
-      "title": "Backlog Pressure Flows",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "s"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#F2495C",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 44
-      },
-      "id": 12,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_backlog_pressure_seconds{job=~\"$job\",instance=~\"$instance\"})), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} backlog pressure seconds",
-          "refId": "A"
-        }
-      ],
-      "title": "Backlog Pressure Duration",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#EAB839",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 52
-      },
-      "id": 13,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_ack_progress_stall_flows{job=~\"$job\",instance=~\"$instance\"})), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} ack-progress stall flows",
-          "refId": "A"
-        }
-      ],
-      "title": "ACK Progress Stall Flows",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "s"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#6ED0E0",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 52
-      },
-      "id": 14,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_ack_progress_stall_seconds{job=~\"$job\",instance=~\"$instance\"})), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} ack-progress stall seconds",
-          "refId": "A"
-        }
-      ],
-      "title": "ACK Progress Stall Duration",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "bytes"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* cwnd$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#33A02C",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* ssthresh$"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#EAB839",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 60
+        "y": 35
       },
       "id": 9,
       "options": {
@@ -1101,17 +413,56 @@
       },
       "targets": [
         {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_congestion_window_bytes{job=~\"$job\",instance=~\"$instance\"}) / clamp_min(sum by (instance, uplink) (outline_ws_rust_tun_tcp_flows_active{job=~\"$job\",instance=~\"$instance\"}), 1)), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} cwnd",
+          "expr": "label_replace(sum by (instance, result) (rate(outline_ws_rust_upstream_transports_total{job=~\"$job\",instance=~\"$instance\",source=\"tun_tcp\",protocol=\"tcp\"}[$__rate_interval])), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "legendFormat": "{{instance_short}} {{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Upstream TCP Transport Open and Close Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "label_replace(sum by (instance, uplink) (outline_ws_rust_bytes_total{job=~\"$job\",instance=~\"$instance\",protocol=\"tcp\",direction=\"client_to_upstream\"}), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "legendFormat": "{{instance_short}} {{uplink}} uploaded",
           "refId": "A"
         },
         {
-          "expr": "label_replace((sum by (instance, uplink) (outline_ws_rust_tun_tcp_slow_start_threshold_bytes{job=~\"$job\",instance=~\"$instance\"}) / clamp_min(sum by (instance, uplink) (outline_ws_rust_tun_tcp_flows_active{job=~\"$job\",instance=~\"$instance\"}), 1)), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
-          "legendFormat": "{{instance_short}} {{uplink}} ssthresh",
+          "expr": "label_replace(sum by (instance, uplink) (outline_ws_rust_bytes_total{job=~\"$job\",instance=~\"$instance\",protocol=\"tcp\",direction=\"upstream_to_client\"}), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "legendFormat": "{{instance_short}} {{uplink}} downloaded",
           "refId": "B"
         }
       ],
-      "title": "Congestion Window and SSThresh",
+      "title": "Total TCP Bytes",
       "type": "timeseries"
     }
   ],
@@ -1121,7 +472,8 @@
   "tags": [
     "outline-ws-rust",
     "tun",
-    "tcp"
+    "tcp",
+    "smoltcp"
   ],
   "templating": {
     "list": [
@@ -1204,8 +556,8 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "outline-ws-rust tun2tcp",
+  "title": "outline-ws-rust tun tcp (smoltcp)",
   "uid": "outline-ws-rust-tun-tcp",
-  "version": 3,
+  "version": 4,
   "weekStart": ""
 }

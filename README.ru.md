@@ -10,7 +10,7 @@
 - WebSocket-over-HTTP/1.1, RFC 8441 (`ws-over-h2`) и RFC 9220 (`ws-over-h3`)
 - метрики Prometheus и готовые дашборды Grafana
 - интеграцию с существующим TUN-устройством для `tun2udp`
-- stateful `tun2tcp`-реле с production-ориентированными ограничениями
+- `smoltcp`-based `tun2tcp`-реле с production-ориентированными ограничениями
 
 ---
 
@@ -24,7 +24,7 @@
 2. Выбирает лучший доступный аплинк с помощью health-проб, EWMA RTT-скоринга, sticky-маршрутизации, гистерезиса, штрафов и warm standby.
 3. Подключается к Outline WebSocket-транспорту в запрошенном режиме (`http1`, `h2` или `h3`) с автоматическим fallback.
 4. Шифрует payload с помощью Shadowsocks AEAD перед отправкой в upstream.
-5. Публикует метрики Prometheus для runtime, аплинков, проб, TUN и `tun2tcp`.
+5. Публикует метрики Prometheus для runtime, аплинков, проб, TUN и жизненного цикла / transport-поведения `tun2tcp`.
 
 ## Архитектура
 
@@ -145,7 +145,7 @@ tun2udp + tun2tcp"]
 
 - только интеграция с существующим TUN-устройством
 - `tun2udp` с управлением жизненным циклом потоков и локальными ICMP echo replies
-- stateful `tun2tcp`-реле с ретрансмитом, zero-window persist/backoff, SACK-aware логикой приёма/отправки, adaptive RTO и bounded buffering
+- `smoltcp`-based `tun2tcp`-реле, интегрированное с существующим выбором аплинка, failover и transport-метриками
 
 ### Операционная поддержка
 
@@ -161,7 +161,7 @@ tun2udp + tun2tcp"]
 Проект намеренно практичен, но ограничения есть:
 
 - Shadowsocks 2022 не реализован.
-- `tun2tcp` ориентирован на production, но всё ещё не эквивалентен ядерному TCP-стеку.
+- `tun2tcp` использует userspace-стек `smoltcp` и всё ещё не эквивалентен ядерному TCP-стеку.
 - IPv4-фрагменты, пути с extension headers в IPv6 и не-echo ICMP на TUN не поддерживаются.
 - HTTP-проба поддерживает только `http://`, не `https://`.
 - TCP failover безопасен до начала полезного обмена данными; живые установленные TCP-туннели не мигрируют прозрачно между аплинками.
@@ -171,7 +171,7 @@ tun2udp + tun2tcp"]
 - `config.toml` — пример конфигурации
 - `systemd/outline-ws-rust.service` — hardened systemd unit
 - `grafana/outline-ws-rust-dashboard.json` — основной операционный дашборд
-- `grafana/outline-ws-rust-tun-tcp-dashboard.json` — дашборд `tun2tcp`
+- `grafana/outline-ws-rust-tun-tcp-dashboard.json` — дашборд `tun2tcp` для active flows, connect'ов, lifecycle events и throughput
 - `grafana/outline-ws-rust-native-burst-dashboard.json` — диагностика стартового и переключательного burst в native Shadowsocks
 - `prometheus/outline-ws-rust-alerts.yml` — alert rules Prometheus
 - `PATCHES.md` — реестр локальных патчей vendored-зависимостей
@@ -275,12 +275,6 @@ listen = "[::1]:9090"
 # handshake_timeout_secs = 15
 # half_close_timeout_secs = 60
 # max_pending_server_bytes = 4194304
-# backlog_abort_grace_secs = 3
-# backlog_hard_limit_multiplier = 2
-# backlog_no_progress_abort_secs = 8
-# max_buffered_client_segments = 4096
-# max_buffered_client_bytes = 262144
-# max_retransmits = 12
 
 [probe]
 interval_secs = 30
@@ -537,18 +531,15 @@ Runtime failover:
 
 Возможности:
 
-- stateful userspace TCP-реле через Outline TCP-аплинки
-- обработка SYN / SYN-ACK / FIN / RST
-- буферизация пакетов вне порядка
-- соблюдение receive window
-- SACK-aware логика приёма/отправки
-- adaptive RTO
-- zero-window persist/backoff
-- ограниченное буферирование и бюджеты ретрансмитов
-- завершение потока по таймауту, переполнению или ошибке реле
-- репортинг ошибок транспорта в систему штрафов аплинков: внезапные закрытия upstream (например, QUIC `APPLICATION_CLOSE` / `H3_INTERNAL_ERROR`) передаются в `report_runtime_failure`, так что H3→H2 даунгрейд и штраф за сбой применяются к TUN TCP-потокам так же, как к SOCKS5-потокам; чистые WebSocket-закрытия (FIN или Close frame) не считаются сбоями
+- userspace TCP-реле на базе виртуального IP-интерфейса `smoltcp`
+- существующие TUN-пакеты инжектятся в стек `smoltcp`, а затем бриджатся в выбранный Outline / direct Shadowsocks TCP uplink
+- создание TCP-flow по SYN, нормальная propagation закрытия и idle-cleanup
+- тот же выбор аплинка, warm-standby, H3-даунгрейд и runtime failover, что и у SOCKS5 TCP
+- ограниченные таймауты на установку соединения и half-close
+- flow-level lifecycle-метрики (`created`, `connected`, `closed`, `finished`, `connect_failed`, `io_error`, `evicted`)
+- репортинг ошибок транспорта в систему штрафов аплинков: внезапные закрытия upstream (например, QUIC `APPLICATION_CLOSE` / `H3_INTERNAL_ERROR`) передаются в `report_runtime_failure`, так что H3→H2 даунгрейд и штраф за сбой применяются к TUN TCP-потокам так же, как к SOCKS5-потокам; чистые закрытия не считаются сбоями
 
-Предназначен для реальной эксплуатации, но всё ещё не является эквивалентом ядерного TCP-стека.
+Путь предназначен для реальной эксплуатации, но всё ещё не является эквивалентом ядерного TCP-стека.
 
 ## Linux fwmark
 
@@ -603,7 +594,7 @@ scrape_configs:
 - результаты и latency проб
 - исходы acquire и refill warm-standby
 - метрики потоков и пакетов TUN
-- метрики ретрансмитов, backlog, window, RTT и RTO `tun2tcp`
+- метрики active flows, async connect, lifecycle events, upstream transports и throughput для `tun2tcp`
 
 На Linux семплер памяти процесса обновляет:
 
@@ -673,9 +664,24 @@ Snapshot дескрипторов включает общее количеств
 Дашборд `tun2tcp` сгруппирован по секциям:
 
 - Overview
-- Recovery & Loss
-- Backlog & Flow State
-- Timing & Window Control
+- Lifecycle
+- Traffic
+
+Он сфокусирован на действительно значимых для текущего `smoltcp`-based пути метриках:
+
+- active flows по uplink'ам и pending handshakes
+- текущая нагрузка на async upstream connect и его исходы
+- скорость lifecycle events (`created`, `connected`, `closed`, `finished`, `connect_failed`, `io_error`, `evicted`)
+- активность underlying transport connect/open/close
+- TCP throughput по uplink'ам
+
+Встроенные alert rules для `tun2tcp` теперь покрывают:
+
+- зависшие pending handshakes
+- повышенную частоту upstream connect failures
+- повышенную частоту runtime I/O failures
+- evictions flow-таблицы
+- повышенную частоту async connect errors
 
 Оба дашборда используют общий цветовой язык: синий — трафик и базовое время, янтарный — нагрузка или деградация latency, красный — сбои и потери, зелёный — здоровая ёмкость или успешное standby-поведение.
 

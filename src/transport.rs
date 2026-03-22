@@ -53,6 +53,8 @@ type RawH3WsStream = SockudoWebSocketStream<SockudoTransportStream<SockudoHttp3>
 
 const MAX_UDP_SOCKET_PACKET_SIZE: usize = 65_507;
 const OVERSIZED_UDP_UPLINK_DROP_ERR: &str = "oversized UDP packet dropped before uplink send";
+const H2_INITIAL_STREAM_WINDOW_SIZE: u32 = 256 * 1024;
+const H2_INITIAL_CONNECTION_WINDOW_SIZE: u32 = 512 * 1024;
 
 pin_project! {
     struct H2WsStream {
@@ -1317,6 +1319,8 @@ async fn connect_websocket_h2(
 
     let (mut send_request, conn) = http2::Builder::new(TokioExecutor::new())
         .timer(TokioTimer::new())
+        .initial_stream_window_size(H2_INITIAL_STREAM_WINDOW_SIZE)
+        .initial_connection_window_size(H2_INITIAL_CONNECTION_WINDOW_SIZE)
         .keep_alive_interval(Some(Duration::from_secs(20)))
         .keep_alive_timeout(Duration::from_secs(20))
         .handshake::<_, Empty<Bytes>>(TokioIo::new(io))

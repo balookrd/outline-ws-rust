@@ -130,48 +130,64 @@ groups:
           summary: TUN UDP flows are failing during runtime I/O
           description: TUN UDP flow read/send errors are being observed on {{ $labels.instance }}.
 
-      - alert: Socks5OutlineWsTunTcpRetransmitRateHigh
+      - alert: Socks5OutlineWsTunTcpPendingHandshakes
         expr: |
-          sum by (instance) (
-            rate(outline_ws_rust_tun_tcp_events_total{job="outline-ws-rust",event=~"fast_retransmit|timeout_retransmit"}[10m])
-          ) > 0.5
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: TUN TCP retransmit rate is elevated
-          description: The tun2tcp state machine is retransmitting at an elevated rate on {{ $labels.instance }}.
-
-      - alert: Socks5OutlineWsTunTcpZeroWindowStalls
-        expr: |
-          max by (instance) (outline_ws_rust_tun_tcp_zero_window_flows{job="outline-ws-rust"}) > 0
-          and
-          sum by (instance) (
-            rate(outline_ws_rust_tun_tcp_events_total{job="outline-ws-rust",event="window_stall"}[10m])
+          max by (instance) (
+            sum by (instance, uplink) (
+              outline_ws_rust_tun_tcp_flows_active{job="outline-ws-rust",uplink="pending"}
+            )
           ) > 0
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: TUN TCP flows are stalled on zero-sized receive windows
-          description: One or more tun2tcp flows are stalled because the client advertise zero window on {{ $labels.instance }}.
+          summary: TUN TCP handshakes are stuck in pending state
+          description: One or more TUN TCP flows have remained in the pending uplink-selection or connect phase on {{ $labels.instance }} for over 10 minutes.
 
-      - alert: Socks5OutlineWsTunTcpBufferedClientBacklog
+      - alert: Socks5OutlineWsTunTcpConnectFailuresHigh
         expr: |
-          max by (instance) (sum by (instance, uplink) (outline_ws_rust_tun_tcp_buffered_client_segments{job="outline-ws-rust"})) > 64
+          sum by (instance) (
+            rate(outline_ws_rust_tun_tcp_events_total{job="outline-ws-rust",event="connect_failed"}[10m])
+          ) > 0.1
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: TUN TCP client-side reassembly backlog is high
-          description: Buffered out-of-order tun2tcp client segments exceed the expected steady-state level on {{ $labels.instance }}.
+          summary: TUN TCP upstream connect failures are elevated
+          description: TUN TCP flows are repeatedly failing to establish an upstream connection on {{ $labels.instance }}.
 
-      - alert: Socks5OutlineWsTunTcpPendingServerBacklog
+      - alert: Socks5OutlineWsTunTcpIoErrorsHigh
         expr: |
-          max by (instance) (sum by (instance, uplink) (outline_ws_rust_tun_tcp_pending_server_bytes{job="outline-ws-rust"})) > 262144
+          sum by (instance) (
+            rate(outline_ws_rust_tun_tcp_events_total{job="outline-ws-rust",event="io_error"}[10m])
+          ) > 0.1
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: TUN TCP server-side pending backlog is high
-          description: Pending server-to-client tun2tcp bytes exceed 256 KiB on {{ $labels.instance }}.
+          summary: TUN TCP runtime I/O errors are elevated
+          description: Established TUN TCP flows are hitting runtime I/O failures at an elevated rate on {{ $labels.instance }}.
+
+      - alert: Socks5OutlineWsTunTcpFlowEvictions
+        expr: |
+          sum by (instance) (
+            rate(outline_ws_rust_tun_tcp_events_total{job="outline-ws-rust",event="evicted"}[10m])
+          ) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: TUN TCP flows are being evicted
+          description: The TUN TCP flow table is evicting stale flows on {{ $labels.instance }}, which may indicate capacity or cleanup issues.
+
+      - alert: Socks5OutlineWsTunTcpAsyncConnectErrorsHigh
+        expr: |
+          sum by (instance) (
+            rate(outline_ws_rust_tun_tcp_async_connects_total{job="outline-ws-rust",result="error"}[10m])
+          ) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: TUN TCP async connect errors are elevated
+          description: Async TUN TCP upstream connect attempts are failing at an elevated rate on {{ $labels.instance }}.

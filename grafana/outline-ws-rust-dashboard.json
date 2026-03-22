@@ -4422,12 +4422,12 @@
       "pluginVersion": "12.3.2",
       "targets": [
         {
-          "expr": "label_replace((sum by (instance, uplink) (rate(outline_ws_rust_tun_flows_total{job=~\"$job\",instance=~\"$instance\",event=\"created\"}[$__rate_interval]))), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "expr": "label_replace((sum by (instance, uplink) (increase(outline_ws_rust_tun_flows_total{job=~\"$job\",instance=~\"$instance\",event=\"created\"}[$__rate_interval]))), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
           "legendFormat": "{{instance_short}} {{uplink}} created",
           "refId": "A"
         },
         {
-          "expr": "label_replace((sum by (instance, uplink) (rate(outline_ws_rust_tun_flows_total{job=~\"$job\",instance=~\"$instance\",event=~\"idle_timeout|evicted|read_error|send_error|closed\"}[$__rate_interval]))), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
+          "expr": "label_replace((sum by (instance, uplink) (increase(outline_ws_rust_tun_flows_total{job=~\"$job\",instance=~\"$instance\",event=~\"idle_timeout|evicted|read_error|send_error|closed\"}[$__rate_interval]))), \"instance_short\", \"$1\", \"instance\", \"^([^.]+).*\")",
           "legendFormat": "{{instance_short}} {{uplink}} closed",
           "refId": "B"
         }

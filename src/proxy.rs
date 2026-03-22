@@ -169,7 +169,11 @@ async fn handle_tcp_connect(
                 }
                 let chunk = reader.read_chunk().await?;
                 if chunk.is_empty() {
-                    continue;
+                    client_write
+                        .shutdown()
+                        .await
+                        .context("client shutdown failed after upstream EOF")?;
+                    break;
                 }
                 metrics::add_bytes(
                     "tcp",
@@ -185,7 +189,6 @@ async fn handle_tcp_connect(
                     .report_active_traffic(selected_index, TransportKind::Tcp)
                     .await;
             }
-            #[allow(unreachable_code)]
             Ok::<(), anyhow::Error>(())
         };
 

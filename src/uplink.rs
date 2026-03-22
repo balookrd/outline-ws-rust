@@ -573,6 +573,9 @@ impl UplinkManager {
         let failure_signature = classify_runtime_failure_signature(&error_text);
         let failure_other_detail = (failure_signature == "other")
             .then(|| normalize_other_runtime_failure_detail(&error_text));
+        let runtime_failure_sets_health =
+            !self.inner.probe.enabled()
+                || self.inner.uplinks[index].transport == UplinkTransport::Shadowsocks;
         let (uplink_name, cooldown_until, penalty_ms, already_in_cooldown, should_wake_probe) = {
             let now = Instant::now();
             let mut statuses = self.inner.statuses.write().await;
@@ -596,7 +599,7 @@ impl UplinkManager {
                         // When probe is disabled there is no other confirmation signal,
                         // so we still penalise immediately to influence cooldown-based
                         // candidate selection.
-                        if !self.inner.probe.enabled() {
+                        if runtime_failure_sets_health {
                             add_penalty(&mut status.tcp_penalty, now, &self.inner.load_balancing);
                         }
                         status.cooldown_until_tcp =
@@ -626,7 +629,7 @@ impl UplinkManager {
                     // what we want to avoid.  When probe is disabled there is no other
                     // health signal, so fall back to marking the uplink unhealthy
                     // immediately so that cooldown-based gating can still trigger a switch.
-                    if !self.inner.probe.enabled() {
+                    if runtime_failure_sets_health {
                         status.tcp_healthy = Some(false);
                     }
                     let should_wake_probe = self.inner.probe.enabled()
@@ -653,7 +656,7 @@ impl UplinkManager {
                         // Same rationale as TCP above: when probe is enabled, defer
                         // penalty to the probe confirmation path to avoid inflating
                         // the score of a healthy-but-loaded uplink.
-                        if !self.inner.probe.enabled() {
+                        if runtime_failure_sets_health {
                             add_penalty(&mut status.udp_penalty, now, &self.inner.load_balancing);
                         }
                         status.cooldown_until_udp =
@@ -675,7 +678,7 @@ impl UplinkManager {
                     } else {
                         metrics::record_runtime_failure_suppressed("udp", &uplink_name);
                     }
-                    if !self.inner.probe.enabled() {
+                    if runtime_failure_sets_health {
                         status.udp_healthy = Some(false);
                     }
                     let should_wake_probe = self.inner.probe.enabled()
@@ -3508,6 +3511,78 @@ mod tests {
         assert_eq!(
             third[0].uplink.name, "backup",
             "should switch when probe confirms failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn global_scope_shadowsocks_switches_on_runtime_failure_even_when_probe_enabled() {
+        let mut config = lb();
+        config.mode = LoadBalancingMode::ActivePassive;
+        config.routing_scope = RoutingScope::Global;
+        let manager = UplinkManager::new(
+            vec![
+                UplinkConfig {
+                    name: "primary".to_string(),
+                    transport: UplinkTransport::Shadowsocks,
+                    tcp_ws_url: None,
+                    tcp_ws_mode: WsTransportMode::Http1,
+                    udp_ws_url: None,
+                    udp_ws_mode: WsTransportMode::Http1,
+                    tcp_addr: Some("primary.example.com:443".parse().unwrap()),
+                    udp_addr: Some("primary.example.com:443".parse().unwrap()),
+                    cipher: CipherKind::Chacha20IetfPoly1305,
+                    password: "secret".to_string(),
+                    weight: 1.0,
+                    fwmark: None,
+                    ipv6_first: false,
+                },
+                UplinkConfig {
+                    name: "backup".to_string(),
+                    transport: UplinkTransport::Shadowsocks,
+                    tcp_ws_url: None,
+                    tcp_ws_mode: WsTransportMode::Http1,
+                    udp_ws_url: None,
+                    udp_ws_mode: WsTransportMode::Http1,
+                    tcp_addr: Some("backup.example.com:443".parse().unwrap()),
+                    udp_addr: Some("backup.example.com:443".parse().unwrap()),
+                    cipher: CipherKind::Chacha20IetfPoly1305,
+                    password: "secret".to_string(),
+                    weight: 1.0,
+                    fwmark: None,
+                    ipv6_first: false,
+                },
+            ],
+            ProbeConfig {
+                interval: Duration::from_secs(30),
+                timeout: Duration::from_secs(5),
+                max_concurrent: 1,
+                max_dials: 1,
+                min_failures: 1,
+                attempts: 1,
+                ws: WsProbeConfig { enabled: true },
+                http: None,
+                dns: None,
+            },
+            config,
+        )
+        .unwrap();
+
+        set_tcp_status(&manager, 0, true, 20).await;
+        set_tcp_status(&manager, 1, true, 60).await;
+
+        let target = TargetAddr::Domain("example.com".to_string(), 443);
+        let first = manager.tcp_candidates(&target).await;
+        assert_eq!(first[0].uplink.name, "primary");
+
+        let err = anyhow!("socket closed");
+        manager
+            .report_runtime_failure(0, TransportKind::Tcp, &err)
+            .await;
+
+        let second = manager.tcp_candidates(&target).await;
+        assert_eq!(
+            second[0].uplink.name, "backup",
+            "direct shadowsocks should switch on runtime failure"
         );
     }
 

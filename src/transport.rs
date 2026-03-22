@@ -912,7 +912,10 @@ impl TcpShadowsocksReader {
 
     pub async fn read_chunk(&mut self) -> Result<Vec<u8>> {
         if self.key.is_none() {
-            let salt = self.read_exact_from_ws(self.cipher.salt_len()).await?;
+            let Some(salt) = self.read_exact_or_eof(self.cipher.salt_len()).await? else {
+                self.closed_cleanly = true;
+                return Ok(Vec::new());
+            };
             self.key = Some(derive_subkey(self.cipher, &self.master_key, &salt)?);
         }
         let key = self
@@ -949,7 +952,10 @@ impl TcpShadowsocksReader {
             }
         }
 
-        let encrypted_len = self.read_exact_from_ws(2 + SHADOWSOCKS_TAG_LEN).await?;
+        let Some(encrypted_len) = self.read_exact_or_eof(2 + SHADOWSOCKS_TAG_LEN).await? else {
+            self.closed_cleanly = true;
+            return Ok(Vec::new());
+        };
         let len = decrypt(self.cipher, &key, &self.nonce, &encrypted_len)?;
         increment_nonce(&mut self.nonce);
 
@@ -969,24 +975,35 @@ impl TcpShadowsocksReader {
         Ok(payload)
     }
 
-    async fn read_exact_from_ws(&mut self, len: usize) -> Result<Vec<u8>> {
+    async fn read_exact_or_eof(&mut self, len: usize) -> Result<Option<Vec<u8>>> {
         match &mut self.transport {
             TcpReadTransport::Socket { reader } => {
                 let mut buf = vec![0u8; len];
-                if let Err(err) = reader.read_exact(&mut buf).await {
-                    if err.kind() == std::io::ErrorKind::UnexpectedEof {
-                        self.closed_cleanly = true;
+                let mut read_total = 0usize;
+                while read_total < len {
+                    let read = reader
+                        .read(&mut buf[read_total..])
+                        .await
+                        .context("socket read failed")?;
+                    if read == 0 {
+                        if read_total == 0 {
+                            self.closed_cleanly = true;
+                            return Ok(None);
+                        }
                         bail!("socket closed");
                     }
-                    return Err(err).context("socket read failed");
+                    read_total += read;
                 }
-                Ok(buf)
+                Ok(Some(buf))
             }
             TcpReadTransport::Websocket { stream, ctrl_tx } => {
                 while self.buffer.len() < len {
                     let next = match stream.next().await {
                         None => {
-                            self.closed_cleanly = true;
+                            if self.buffer.is_empty() {
+                                self.closed_cleanly = true;
+                                return Ok(None);
+                            }
                             bail!("websocket closed");
                         }
                         Some(Ok(msg)) => msg,
@@ -996,7 +1013,10 @@ impl TcpShadowsocksReader {
                     match next {
                         Message::Binary(bytes) => self.buffer.extend_from_slice(&bytes),
                         Message::Close(_) => {
-                            self.closed_cleanly = true;
+                            if self.buffer.is_empty() {
+                                self.closed_cleanly = true;
+                                return Ok(None);
+                            }
                             bail!("websocket closed");
                         }
                         Message::Ping(payload) => {
@@ -1009,9 +1029,15 @@ impl TcpShadowsocksReader {
                 }
 
                 let tail = self.buffer.split_off(len);
-                Ok(std::mem::replace(&mut self.buffer, tail))
+                Ok(Some(std::mem::replace(&mut self.buffer, tail)))
             }
         }
+    }
+
+    async fn read_exact_from_ws(&mut self, len: usize) -> Result<Vec<u8>> {
+        self.read_exact_or_eof(len)
+            .await?
+            .ok_or_else(|| anyhow!("upstream closed before completing frame"))
     }
 }
 
@@ -1854,5 +1880,36 @@ mod tests {
 
         let total = server.await.unwrap();
         assert!(total > payload.len());
+    }
+
+    #[tokio::test]
+    async fn tcp_socket_reader_returns_empty_chunk_on_clean_eof() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cipher = CipherKind::Chacha20IetfPoly1305;
+        let master_key = cipher.derive_master_key("password").unwrap();
+
+        let server_key = master_key.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (_reader_half, writer_half) = stream.into_split();
+            let lifetime = UpstreamTransportGuard::new("test", "tcp");
+            let mut writer =
+                TcpShadowsocksWriter::connect_socket(writer_half, cipher, &server_key, lifetime)
+                    .unwrap();
+            writer.send_chunk(b"hello").await.unwrap();
+            writer.close().await.unwrap();
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let (reader_half, _writer_half) = stream.into_split();
+        let lifetime = UpstreamTransportGuard::new("test", "tcp");
+        let mut reader = TcpShadowsocksReader::new_socket(reader_half, cipher, &master_key, lifetime);
+
+        assert_eq!(reader.read_chunk().await.unwrap(), b"hello");
+        assert!(reader.read_chunk().await.unwrap().is_empty());
+        assert!(reader.closed_cleanly);
+
+        server.await.unwrap();
     }
 }

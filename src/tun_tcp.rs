@@ -4,14 +4,14 @@ use std::mem;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow, bail};
-use smoltcp::iface::{Config as InterfaceConfig, Interface, PollResult, SocketHandle, SocketSet, SocketStorage};
+use smoltcp::iface::{Config as InterfaceConfig, Interface, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::phy::{Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp::{Socket as TcpSocket, SocketBuffer as TcpSocketBuffer, State as TcpState};
 use smoltcp::time::{Duration as SmolDuration, Instant as SmolInstant};
@@ -362,7 +362,10 @@ impl AsyncWrite for TcpConnection {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut control = self.control.lock().expect("tcp control poisoned");
-        if matches!(control.send_state, TcpSocketState::Closed) {
+        if matches!(
+            control.send_state,
+            TcpSocketState::Closing | TcpSocketState::Closed
+        ) {
             return Poll::Ready(Ok(()));
         }
         if matches!(control.send_state, TcpSocketState::Normal) {
@@ -464,9 +467,7 @@ impl TunTcpEngine {
                         }
 
                         let now = smol_now(manager_started_at);
-                        if let PollResult::SocketStateChanged = iface.poll(now, &mut device, &mut socket_set) {
-                            debug!("smoltcp interface state changed");
-                        }
+                        let _ = iface.poll(now, &mut device, &mut socket_set);
 
                         let mut sockets_to_remove = Vec::new();
                         for (&socket_handle, control) in &sockets {
@@ -496,12 +497,15 @@ impl TunTcpEngine {
                                 continue;
                             }
 
+                            let mut wake_writer = false;
+
                             if matches!(control.send_state, TcpSocketState::Close)
                                 && socket.send_queue() == 0
                                 && control.send_buffer.is_empty()
                             {
                                 socket.close();
                                 control.send_state = TcpSocketState::Closing;
+                                wake_writer = true;
                             }
 
                             let mut wake_reader = false;
@@ -548,7 +552,6 @@ impl TunTcpEngine {
                                 waker.wake();
                             }
 
-                            let mut wake_writer = false;
                             while socket.can_send() && !control.send_buffer.is_empty() {
                                 let queued: Vec<u8> = control.send_buffer.iter().copied().collect();
                                 let result = socket.send(|buffer| {
@@ -733,6 +736,14 @@ impl TunTcpEngine {
         self.inner.flows.lock().await.insert(key.clone(), flow.clone());
         metrics::add_tun_tcp_flows_active("pending", 1);
         metrics::record_tun_tcp_event("pending", "created");
+        info!(
+            client = %key.client,
+            remote = %remote_addr,
+            send_capacity,
+            recv_capacity,
+            max_flows = self.inner.max_flows,
+            "TUN TCP flow created"
+        );
 
         let engine = self.clone();
         tokio::spawn(async move {
@@ -766,13 +777,35 @@ impl TunTcpEngine {
         connection: TcpConnection,
         flow: TcpFlowHandle,
     ) -> Result<()> {
-        timeout(self.inner.tcp.handshake_timeout, connection.wait_established())
+        let local_handshake_timeout = self
+            .inner
+            .tcp
+            .handshake_timeout
+            .min(Duration::from_secs(3));
+        debug!(
+            client = %key.client,
+            remote = %remote_addr,
+            handshake_timeout_ms = local_handshake_timeout.as_millis(),
+            "waiting for local smoltcp TCP handshake"
+        );
+        timeout(local_handshake_timeout, connection.wait_established())
             .await
             .context("timed out waiting for local smoltcp TCP handshake")?
             .context("local smoltcp TCP handshake failed")?;
+        info!(
+            client = %key.client,
+            remote = %remote_addr,
+            "local smoltcp TCP handshake established"
+        );
         metrics::add_tun_tcp_async_connects_active(1);
         metrics::record_tun_tcp_async_connect("started");
         let connect_deadline = self.inner.tcp.connect_timeout + self.inner.tcp.handshake_timeout;
+        debug!(
+            client = %key.client,
+            remote = %remote_addr,
+            connect_deadline_ms = connect_deadline.as_millis(),
+            "connecting TUN TCP uplink"
+        );
         let ((candidate, mut upstream_writer, mut upstream_reader), uplink_name) = timeout(
             connect_deadline,
             async {
@@ -789,26 +822,59 @@ impl TunTcpEngine {
         metrics::add_tun_tcp_flows_active("pending", -1);
         metrics::add_tun_tcp_flows_active(&uplink_name, 1);
         metrics::record_tun_tcp_event(&uplink_name, "connected");
+        info!(
+            client = %key.client,
+            remote = %remote_addr,
+            uplink = %uplink_name,
+            connect_timeout_ms = self.inner.tcp.connect_timeout.as_millis(),
+            handshake_timeout_ms = self.inner.tcp.handshake_timeout.as_millis(),
+            "TUN TCP uplink connected"
+        );
         *flow.uplink_name.lock().expect("uplink_name poisoned") = Some(uplink_name.clone());
+        let connected_at = Instant::now();
         *flow
             .last_activity_at
             .lock()
-            .expect("last_activity_at poisoned") = Instant::now();
+            .expect("last_activity_at poisoned") = connected_at;
 
         let (mut client_reader, mut client_writer) = tokio::io::split(connection);
         let uplinks = self.inner.uplinks.clone();
         let candidate_index = candidate.index;
+        let is_direct_shadowsocks = candidate.uplink.transport == UplinkTransport::Shadowsocks;
+        let uploaded_bytes_shared = Arc::new(AtomicUsize::new(0));
+        let downloaded_bytes_shared = Arc::new(AtomicUsize::new(0));
         let uplink_for_upload = uplink_name.clone();
         let uplinks_for_upload = uplinks.clone();
         let activity_for_upload = Arc::clone(&flow.last_activity_at);
+        let uploaded_bytes_for_upload = Arc::clone(&uploaded_bytes_shared);
+        let client_for_upload = key.client;
+        let remote_for_upload = remote_addr;
         let upload = async move {
             let mut buf = vec![0u8; 16 * 1024];
+            let mut uploaded_bytes = 0usize;
             loop {
                 let read = client_reader
                     .read(&mut buf)
                     .await
                     .context("failed reading from smoltcp TCP stream")?;
                 if read == 0 {
+                    if uploaded_bytes == 0 && is_direct_shadowsocks {
+                        warn!(
+                            client = %client_for_upload,
+                            remote = %remote_for_upload,
+                            uplink = %uplink_for_upload,
+                            uploaded_bytes,
+                            "client side reached EOF before any payload on direct Shadowsocks flow"
+                        );
+                    } else {
+                        info!(
+                            client = %client_for_upload,
+                            remote = %remote_for_upload,
+                            uplink = %uplink_for_upload,
+                            uploaded_bytes,
+                            "client side reached EOF, closing upstream TCP writer"
+                        );
+                    }
                     if let Err(error) = upstream_writer.close().await {
                         uplinks_for_upload
                             .report_runtime_failure(candidate_index, TransportKind::Tcp, &error)
@@ -822,6 +888,17 @@ impl TunTcpEngine {
                     .lock()
                     .expect("last_activity_at poisoned") = Instant::now();
                 metrics::add_bytes("tcp", "client_to_upstream", &uplink_for_upload, read);
+                uploaded_bytes += read;
+                uploaded_bytes_for_upload.store(uploaded_bytes, Ordering::Relaxed);
+                if uploaded_bytes == read {
+                    info!(
+                        client = %client_for_upload,
+                        remote = %remote_for_upload,
+                        uplink = %uplink_for_upload,
+                        first_chunk_bytes = read,
+                        "first client TCP payload forwarded upstream"
+                    );
+                }
                 if let Err(error) = upstream_writer.send_chunk(&buf[..read]).await {
                     uplinks_for_upload
                         .report_runtime_failure(candidate_index, TransportKind::Tcp, &error)
@@ -835,8 +912,12 @@ impl TunTcpEngine {
         let uplink_for_download = uplink_name.clone();
         let uplinks_for_download = uplinks.clone();
         let activity_for_download = Arc::clone(&flow.last_activity_at);
+        let downloaded_bytes_for_download = Arc::clone(&downloaded_bytes_shared);
         let half_close_timeout = self.inner.tcp.half_close_timeout;
+        let client_for_download = key.client;
+        let remote_for_download = remote_addr;
         let download = async move {
+            let mut downloaded_bytes = 0usize;
             loop {
                 let chunk = match upstream_reader.read_chunk().await {
                     Ok(chunk) => chunk,
@@ -848,6 +929,25 @@ impl TunTcpEngine {
                     }
                 };
                 if chunk.is_empty() {
+                    if downloaded_bytes == 0 && is_direct_shadowsocks {
+                        warn!(
+                            client = %client_for_download,
+                            remote = %remote_for_download,
+                            uplink = %uplink_for_download,
+                            downloaded_bytes,
+                            half_close_timeout_ms = half_close_timeout.as_millis(),
+                            "direct Shadowsocks upstream reached EOF before sending any payload"
+                        );
+                    } else {
+                        info!(
+                            client = %client_for_download,
+                            remote = %remote_for_download,
+                            uplink = %uplink_for_download,
+                            downloaded_bytes,
+                            half_close_timeout_ms = half_close_timeout.as_millis(),
+                            "upstream side reached EOF, shutting down client TCP writer"
+                        );
+                    }
                     timeout(half_close_timeout, client_writer.shutdown())
                         .await
                         .context("timed out shutting down client TCP stream")?
@@ -858,6 +958,17 @@ impl TunTcpEngine {
                     .lock()
                     .expect("last_activity_at poisoned") = Instant::now();
                 metrics::add_bytes("tcp", "upstream_to_client", &uplink_for_download, chunk.len());
+                downloaded_bytes += chunk.len();
+                downloaded_bytes_for_download.store(downloaded_bytes, Ordering::Relaxed);
+                if downloaded_bytes == chunk.len() {
+                    info!(
+                        client = %client_for_download,
+                        remote = %remote_for_download,
+                        uplink = %uplink_for_download,
+                        first_chunk_bytes = chunk.len(),
+                        "first upstream TCP payload forwarded to client"
+                    );
+                }
                 client_writer
                     .write_all(&chunk)
                     .await
@@ -866,14 +977,52 @@ impl TunTcpEngine {
             Ok::<(), anyhow::Error>(())
         };
 
-        let (upload_result, download_result) = tokio::join!(upload, download);
+        let (upload_result, download_result) =
+            if is_direct_shadowsocks {
+                let first_byte_timeout = self.inner.tcp.connect_timeout;
+                let transfer = async {
+                    tokio::join!(upload, download)
+                };
+                tokio::pin!(transfer);
+                tokio::select! {
+                    results = &mut transfer => results,
+                    _ = tokio::time::sleep(first_byte_timeout) => {
+                        let uploaded_bytes = uploaded_bytes_shared.load(Ordering::Relaxed);
+                        let downloaded_bytes = downloaded_bytes_shared.load(Ordering::Relaxed);
+                        if uploaded_bytes == 0 && downloaded_bytes == 0 {
+                            let error = anyhow!("no TUN TCP progress after uplink connect");
+                            uplinks
+                                .report_runtime_failure(candidate_index, TransportKind::Tcp, &error)
+                                .await;
+                            return Err(error).context("TUN TCP flow stalled before first payload");
+                        }
+                        if uploaded_bytes > 0 && downloaded_bytes == 0 {
+                            let error = anyhow!("no upstream TCP response after client payload");
+                            uplinks
+                                .report_runtime_failure(candidate_index, TransportKind::Tcp, &error)
+                                .await;
+                            return Err(error)
+                                .context("TUN TCP flow stalled waiting for first upstream payload");
+                        }
+                        (&mut transfer).await
+                    }
+                }
+            } else {
+                tokio::join!(upload, download)
+            };
         upload_result?;
         download_result?;
+        let uploaded_bytes = uploaded_bytes_shared.load(Ordering::Relaxed);
+        let downloaded_bytes = downloaded_bytes_shared.load(Ordering::Relaxed);
         metrics::record_tun_tcp_event(&uplink_name, "closed");
         info!(
             client = %key.client,
             remote = %remote_addr,
             uplink = %uplink_name,
+            transport = ?candidate.uplink.transport,
+            uploaded_bytes,
+            downloaded_bytes,
+            lifetime_ms = flow.created_at.elapsed().as_millis(),
             "TUN TCP flow closed cleanly"
         );
         Ok(())
@@ -895,6 +1044,12 @@ impl TunTcpEngine {
             }
         }
         for key in stale {
+            info!(
+                client = %key.client,
+                remote = %key.remote,
+                idle_timeout_ms = self.inner.idle_timeout.as_millis(),
+                "evicting idle TUN TCP flow"
+            );
             self.close_flow(&key, FLOW_CLOSE_REASON_EVICTED).await;
         }
     }
@@ -918,6 +1073,14 @@ impl TunTcpEngine {
             Instant::now().saturating_duration_since(handle.created_at),
         );
         metrics::record_tun_tcp_event(&uplink_name, reason);
+        info!(
+            client = %key.client,
+            remote = %key.remote,
+            uplink = %uplink_name,
+            reason,
+            lifetime_ms = handle.created_at.elapsed().as_millis(),
+            "TUN TCP flow closed"
+        );
     }
 }
 
@@ -1070,6 +1233,12 @@ async fn do_tcp_ss_setup(
         .send_chunk(&target.to_wire_bytes()?)
         .await
         .context("failed to send target address")?;
+    debug!(
+        uplink = %uplink.name,
+        remote = %target,
+        transport = "websocket_shadowsocks",
+        "sent Shadowsocks target address upstream for TUN TCP flow"
+    );
     Ok((writer, reader))
 }
 
@@ -1094,6 +1263,12 @@ async fn do_tcp_ss_setup_socket(
         .send_chunk(&target.to_wire_bytes()?)
         .await
         .context("failed to send target address")?;
+    debug!(
+        uplink = %uplink.name,
+        remote = %target,
+        transport = "direct_shadowsocks",
+        "sent Shadowsocks target address upstream for TUN TCP flow"
+    );
     Ok((writer, reader))
 }
 

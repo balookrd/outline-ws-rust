@@ -262,7 +262,13 @@ async fn tun_read_loop(
                     ip_family_name(version_nibble),
                     "unsupported",
                 );
-                debug!(reason, packet_len = read, "ignoring unsupported TUN packet");
+                let packet_summary = summarize_unsupported_packet(packet);
+                debug!(
+                    reason,
+                    packet_len = read,
+                    packet = %packet_summary,
+                    "ignoring unsupported TUN packet"
+                );
             }
         }
     }
@@ -771,6 +777,38 @@ fn classify_ipv6_icmp_packet(packet: &[u8]) -> Result<PacketDisposition> {
         128 => PacketDisposition::IcmpEchoRequest,
         _ => PacketDisposition::Unsupported("non-echo ICMPv6 is not supported on TUN"),
     })
+}
+
+fn summarize_unsupported_packet(packet: &[u8]) -> String {
+    let version = match packet.first() {
+        Some(first) => first >> 4,
+        None => return "empty".to_string(),
+    };
+    match version {
+        4 => summarize_unsupported_ipv4_packet(packet),
+        6 => summarize_unsupported_ipv6_packet(packet),
+        other => format!("ipv{other}"),
+    }
+}
+
+fn summarize_unsupported_ipv4_packet(packet: &[u8]) -> String {
+    if packet.len() < IPV4_HEADER_LEN {
+        return "ipv4 short".to_string();
+    }
+    let protocol = packet[9];
+    let src = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+    let dst = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+    format!("ipv4 proto={protocol} src={src} dst={dst}")
+}
+
+fn summarize_unsupported_ipv6_packet(packet: &[u8]) -> String {
+    if packet.len() < IPV6_HEADER_LEN {
+        return "ipv6 short".to_string();
+    }
+    let next_header = packet[6];
+    let src = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).expect("slice length checked"));
+    let dst = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).expect("slice length checked"));
+    format!("ipv6 next_header={next_header} src={src} dst={dst}")
 }
 
 fn parse_udp_packet(packet: &[u8]) -> Result<ParsedUdpPacket> {

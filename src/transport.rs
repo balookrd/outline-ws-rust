@@ -41,6 +41,7 @@ use crate::crypto::{
     decrypt_udp_packet_2022, derive_subkey, encrypt, encrypt_udp_packet, encrypt_udp_packet_2022,
     increment_nonce,
 };
+use crate::memory::trigger_opportunistic_trim;
 use crate::metrics::{
     add_transport_connects_active, add_upstream_transports_active, record_transport_connect,
     record_upstream_transport,
@@ -262,6 +263,7 @@ impl Drop for UpstreamTransportGuard {
     fn drop(&mut self) {
         record_upstream_transport(self.source, self.protocol, "closed");
         add_upstream_transports_active(self.source, self.protocol, -1);
+        trigger_opportunistic_trim();
     }
 }
 

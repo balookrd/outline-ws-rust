@@ -9,10 +9,10 @@ use std::time::Duration;
 use common::*;
 
 #[test]
-fn tcp_connect_over_real_h2_server() -> Result<(), Box<dyn std::error::Error>> {
+fn tcp_connect_over_real_h1_server() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_lock().lock().unwrap();
-    if env::var("RUN_REAL_SERVER_H2").ok().as_deref() != Some("1") {
-        eprintln!("skipping real h2 integration test; set RUN_REAL_SERVER_H2=1 to enable");
+    if env::var("RUN_REAL_SERVER_H1").ok().as_deref() != Some("1") {
+        eprintln!("skipping real h1 integration test; set RUN_REAL_SERVER_H1=1 to enable");
         return Ok(());
     }
 
@@ -21,13 +21,13 @@ fn tcp_connect_over_real_h2_server() -> Result<(), Box<dyn std::error::Error>> {
     let password = required_env("SHADOWSOCKS_PASSWORD")?;
     let method =
         env::var("SHADOWSOCKS_METHOD").unwrap_or_else(|_| "chacha20-ietf-poly1305".to_string());
-    let target_host = env::var("H2_TEST_TARGET_HOST").unwrap_or_else(|_| "example.com".into());
-    let target_port: u16 = env::var("H2_TEST_TARGET_PORT")
+    let target_host = env::var("H1_TEST_TARGET_HOST").unwrap_or_else(|_| "example.com".into());
+    let target_port: u16 = env::var("H1_TEST_TARGET_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(80);
 
-    let temp = TestDir::new("outline-ws-rust-real-h2")?;
+    let temp = TestDir::new("outline-ws-rust-real-h1")?;
     let proxy_port = reserve_tcp_port()?;
     let config_path = temp.path().join("proxy.toml");
 
@@ -38,7 +38,7 @@ listen = "127.0.0.1:{proxy_port}"
 
 [outline]
 tcp_ws_url = "{tcp_ws_url}"
-tcp_ws_mode = "h2"
+tcp_ws_mode = "http1"
 method = "{method}"
 password = "{password}"
 "#
@@ -47,7 +47,7 @@ password = "{password}"
         config.push_str(&format!(
             r#"
 udp_ws_url = "{udp_ws_url}"
-udp_ws_mode = "h2"
+udp_ws_mode = "http1"
 "#
         ));
     }
@@ -91,10 +91,10 @@ udp_ws_mode = "h2"
 }
 
 #[test]
-fn udp_associate_over_real_h2_server() -> Result<(), Box<dyn std::error::Error>> {
+fn udp_associate_over_real_h1_server() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_lock().lock().unwrap();
-    if env::var("RUN_REAL_SERVER_H2").ok().as_deref() != Some("1") {
-        eprintln!("skipping real h2 integration test; set RUN_REAL_SERVER_H2=1 to enable");
+    if env::var("RUN_REAL_SERVER_H1").ok().as_deref() != Some("1") {
+        eprintln!("skipping real h1 integration test; set RUN_REAL_SERVER_H1=1 to enable");
         return Ok(());
     }
 
@@ -103,14 +103,14 @@ fn udp_associate_over_real_h2_server() -> Result<(), Box<dyn std::error::Error>>
     let password = required_env("SHADOWSOCKS_PASSWORD")?;
     let method =
         env::var("SHADOWSOCKS_METHOD").unwrap_or_else(|_| "chacha20-ietf-poly1305".to_string());
-    let dns_server = env::var("H2_TEST_DNS_SERVER").unwrap_or_else(|_| "1.1.1.1".into());
-    let dns_port: u16 = env::var("H2_TEST_DNS_PORT")
+    let dns_server = env::var("H1_TEST_DNS_SERVER").unwrap_or_else(|_| "1.1.1.1".into());
+    let dns_port: u16 = env::var("H1_TEST_DNS_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(53);
-    let dns_name = env::var("H2_TEST_DNS_NAME").unwrap_or_else(|_| "example.com".into());
+    let dns_name = env::var("H1_TEST_DNS_NAME").unwrap_or_else(|_| "example.com".into());
 
-    let temp = TestDir::new("outline-ws-rust-real-h2")?;
+    let temp = TestDir::new("outline-ws-rust-real-h1")?;
     let proxy_port = reserve_tcp_port()?;
     let config_path = temp.path().join("proxy.toml");
 
@@ -121,9 +121,9 @@ listen = "127.0.0.1:{proxy_port}"
 
 [outline]
 tcp_ws_url = "{tcp_ws_url}"
-tcp_ws_mode = "h2"
+tcp_ws_mode = "http1"
 udp_ws_url = "{udp_ws_url}"
-udp_ws_mode = "h2"
+udp_ws_mode = "http1"
 method = "{method}"
 password = "{password}"
 "#

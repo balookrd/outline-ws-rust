@@ -517,26 +517,41 @@ async fn select_udp_candidate_and_connect(
 ) -> Result<(UplinkCandidate, UdpWsTransport)> {
     let mut last_error = None;
     let strict_transport = uplinks.strict_active_uplink_for(TransportKind::Udp);
-    let candidates = uplinks.udp_candidates(Some(remote_target)).await;
-    let iter = if strict_transport {
-        candidates.into_iter().take(1).collect::<Vec<_>>()
-    } else {
-        candidates
-    };
-    for candidate in iter {
-        match uplinks
-            .acquire_udp_standby_or_connect(&candidate, "tun_udp")
-            .await
-        {
-            Ok(transport) => {
-                return Ok((candidate, transport));
+    let mut tried_indexes = std::collections::HashSet::new();
+
+    loop {
+        let candidates = uplinks.udp_candidates(Some(remote_target)).await;
+        let iter = if strict_transport {
+            candidates.into_iter().take(1).collect::<Vec<_>>()
+        } else {
+            candidates
+        };
+        if iter.is_empty() {
+            break;
+        }
+        let mut progressed = false;
+        for candidate in iter {
+            if strict_transport && !tried_indexes.insert(candidate.index) {
+                continue;
             }
-            Err(error) => {
-                uplinks
-                    .report_runtime_failure(candidate.index, TransportKind::Udp, &error)
-                    .await;
-                last_error = Some(format!("{}: {error:#}", candidate.uplink.name));
+            progressed = true;
+            match uplinks
+                .acquire_udp_standby_or_connect(&candidate, "tun_udp")
+                .await
+            {
+                Ok(transport) => {
+                    return Ok((candidate, transport));
+                }
+                Err(error) => {
+                    uplinks
+                        .report_runtime_failure(candidate.index, TransportKind::Udp, &error)
+                        .await;
+                    last_error = Some(format!("{}: {error:#}", candidate.uplink.name));
+                }
             }
+        }
+        if !strict_transport || !progressed {
+            break;
         }
     }
     Err(anyhow!(

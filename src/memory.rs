@@ -206,6 +206,10 @@ pub fn spawn_periodic_trim_loop(interval: Duration) {
     }
 }
 
+pub fn trigger_opportunistic_trim() {
+    trim_memory_now("opportunistic", true);
+}
+
 fn release_to_os_if_supported() {
     trim_memory_now("opportunistic", true);
 }

@@ -104,7 +104,7 @@ pub async fn spawn_tun_loop(config: TunConfig, uplinks: UplinkManager) -> Result
         config.tcp.clone(),
     );
     metrics::set_tun_config(max_flows, idle_timeout);
-    spawn_flow_cleanup_loop(Arc::clone(&flows), idle_timeout);
+    spawn_flow_cleanup_loop(&flows, idle_timeout);
 
     tokio::spawn(async move {
         if let Err(error) = tun_read_loop(
@@ -658,10 +658,14 @@ fn spawn_udp_flow_reader(
     });
 }
 
-fn spawn_flow_cleanup_loop(flows: FlowTable, idle_timeout: Duration) {
+fn spawn_flow_cleanup_loop(flows: &FlowTable, idle_timeout: Duration) {
+    let flows = Arc::downgrade(flows);
     tokio::spawn(async move {
         loop {
             sleep(TUN_FLOW_CLEANUP_INTERVAL).await;
+            let Some(flows) = flows.upgrade() else {
+                break;
+            };
             cleanup_idle_flows(&flows, idle_timeout).await;
         }
     });
@@ -1233,12 +1237,28 @@ fn open_tun_device(config: &TunConfig) -> Result<std::fs::File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        IPV4_HEADER_LEN, IPV6_HEADER_LEN, IpVersion, PacketDisposition, build_icmp_echo_reply,
-        build_ipv4_udp_packet, build_ipv6_udp_packet, checksum16, classify_packet, icmpv6_checksum,
-        parse_udp_packet,
+    use super::*;
+    use std::fs;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     };
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
+    use url::Url;
+
+    use crate::config::{
+        LoadBalancingConfig, LoadBalancingMode, ProbeConfig, RoutingScope, UplinkConfig,
+        WsProbeConfig,
+    };
+    use crate::crypto::{decrypt_udp_packet, encrypt_udp_packet};
+    use crate::metrics;
+    use crate::types::{CipherKind, TargetAddr, UplinkTransport, WsTransportMode};
+    use crate::uplink::UplinkManager;
 
     #[test]
     fn ipv4_udp_roundtrip() {
@@ -1407,5 +1427,316 @@ mod tests {
         let checksum = icmpv6_checksum(source_ip, destination_ip, &packet[icmp_offset..]);
         packet[icmp_offset + 2..icmp_offset + 4].copy_from_slice(&checksum.to_be_bytes());
         packet
+    }
+
+    #[tokio::test]
+    async fn udp_flow_routes_burst_responses_to_same_client_port() {
+        metrics::init();
+
+        let cipher = CipherKind::Chacha20IetfPoly1305;
+        let password = "Secret0";
+        let server = UdpBurstWsServer::start(cipher, password, 5).await;
+        let uplinks = test_udp_uplink_manager(server.url(), cipher, password);
+
+        let tun_path = temp_test_path("tun-udp-burst");
+        let tun_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(true)
+            .open(&tun_path)
+            .expect("open test TUN output");
+        let writer = SharedTunWriter::new(File::from_std(tun_file));
+        let flows: FlowTable = Arc::new(Mutex::new(HashMap::new()));
+        let flow_ids = Arc::new(AtomicU64::new(1));
+
+        let client_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let remote_ip = Ipv4Addr::new(203, 0, 113, 10);
+        let client_port = 40123;
+        let remote_port = 5300;
+        forward_udp_packet(
+            ParsedUdpPacket {
+                version: IpVersion::V4,
+                source_ip: IpAddr::V4(client_ip),
+                destination_ip: IpAddr::V4(remote_ip),
+                source_port: client_port,
+                destination_port: remote_port,
+                payload: b"probe-payload".to_vec(),
+            },
+            &writer,
+            &uplinks,
+            &flows,
+            &flow_ids,
+            16,
+        )
+        .await
+        .expect("forward initial UDP packet through TUN NAT");
+
+        let responses = wait_for_udp_packets(&tun_path, 5, Duration::from_secs(5)).await;
+        assert_eq!(responses.len(), 5, "expected exactly five UDP responses");
+
+        for (index, packet) in responses.iter().enumerate() {
+            assert_eq!(packet.version, IpVersion::V4);
+            assert_eq!(packet.source_ip, IpAddr::V4(remote_ip));
+            assert_eq!(packet.destination_ip, IpAddr::V4(client_ip));
+            assert_eq!(packet.source_port, remote_port);
+            assert_eq!(
+                packet.destination_port, client_port,
+                "reply #{index} was not mapped back to the original client port"
+            );
+            assert_eq!(
+                packet.payload,
+                format!("reply-{index}").into_bytes(),
+                "unexpected payload in reply #{index}"
+            );
+        }
+
+        assert_eq!(
+            server.accepted_connections(),
+            1,
+            "one outgoing UDP packet should create exactly one upstream flow"
+        );
+        assert_eq!(
+            server.received_requests(),
+            1,
+            "test server should observe exactly one upstream UDP request"
+        );
+
+        wait_for_flow_count(&flows, 0, Duration::from_secs(5)).await;
+        let _ = fs::remove_file(&tun_path);
+    }
+
+    fn test_udp_uplink_manager(url: Url, cipher: CipherKind, password: &str) -> UplinkManager {
+        UplinkManager::new(
+            vec![UplinkConfig {
+                name: "test".to_string(),
+                transport: UplinkTransport::Websocket,
+                tcp_ws_url: None,
+                tcp_ws_mode: WsTransportMode::Http1,
+                udp_ws_url: Some(url),
+                udp_ws_mode: WsTransportMode::Http1,
+                tcp_addr: None,
+                udp_addr: None,
+                cipher,
+                password: password.to_string(),
+                weight: 1.0,
+                fwmark: None,
+                ipv6_first: false,
+            }],
+            ProbeConfig {
+                interval: Duration::from_secs(30),
+                timeout: Duration::from_secs(5),
+                max_concurrent: 1,
+                max_dials: 1,
+                min_failures: 1,
+                attempts: 1,
+                ws: WsProbeConfig { enabled: false },
+                http: None,
+                dns: None,
+            },
+            LoadBalancingConfig {
+                mode: LoadBalancingMode::ActiveActive,
+                routing_scope: RoutingScope::PerFlow,
+                sticky_ttl: Duration::from_secs(60),
+                hysteresis: Duration::from_millis(0),
+                failure_cooldown: Duration::from_secs(5),
+                warm_standby_tcp: 0,
+                warm_standby_udp: 0,
+                rtt_ewma_alpha: 0.5,
+                failure_penalty: Duration::from_millis(0),
+                failure_penalty_max: Duration::from_millis(0),
+                failure_penalty_halflife: Duration::from_secs(60),
+                h3_downgrade_duration: Duration::from_secs(60),
+                udp_ws_keepalive_interval: None,
+                tcp_ws_standby_keepalive_interval: None,
+                auto_failback: false,
+            },
+        )
+        .expect("build test uplink manager")
+    }
+
+    fn temp_test_path(prefix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}.bin",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("current time after epoch")
+                .as_nanos()
+        ))
+    }
+
+    async fn wait_for_udp_packets(
+        path: &std::path::Path,
+        expected: usize,
+        timeout: Duration,
+    ) -> Vec<ParsedUdpPacket> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(bytes) = fs::read(path)
+                && let Ok(packets) = split_tun_packets(&bytes)
+                && packets.len() >= expected
+            {
+                return packets
+                    .into_iter()
+                    .map(|packet| parse_udp_packet(&packet).expect("valid UDP response packet"))
+                    .collect();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {expected} UDP packets in {}",
+                path.display()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn wait_for_flow_count(flows: &FlowTable, expected: usize, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if flows.lock().await.len() == expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for flow count {expected}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn split_tun_packets(bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let mut packets = Vec::new();
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let version = bytes
+                .get(offset)
+                .ok_or_else(|| anyhow!("missing IP version nibble"))?
+                >> 4;
+            let packet_len = match version {
+                4 => {
+                    if bytes.len() < offset + IPV4_HEADER_LEN {
+                        bail!("short IPv4 packet in TUN capture");
+                    }
+                    usize::from(u16::from_be_bytes([bytes[offset + 2], bytes[offset + 3]]))
+                }
+                6 => {
+                    if bytes.len() < offset + IPV6_HEADER_LEN {
+                        bail!("short IPv6 packet in TUN capture");
+                    }
+                    IPV6_HEADER_LEN
+                        + usize::from(u16::from_be_bytes([bytes[offset + 4], bytes[offset + 5]]))
+                }
+                other => bail!("unexpected IP version in TUN capture: {other}"),
+            };
+            if packet_len == 0 || bytes.len() < offset + packet_len {
+                bail!("truncated TUN packet capture");
+            }
+            packets.push(bytes[offset..offset + packet_len].to_vec());
+            offset += packet_len;
+        }
+        Ok(packets)
+    }
+
+    struct UdpBurstWsServer {
+        addr: SocketAddr,
+        accepted_connections: Arc<AtomicUsize>,
+        received_requests: Arc<AtomicUsize>,
+    }
+
+    impl UdpBurstWsServer {
+        async fn start(cipher: CipherKind, password: &str, burst_size: usize) -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("bind UDP burst WS server");
+            let addr = listener.local_addr().expect("UDP burst WS server address");
+            let accepted_connections = Arc::new(AtomicUsize::new(0));
+            let received_requests = Arc::new(AtomicUsize::new(0));
+            let master_key = cipher
+                .derive_master_key(password)
+                .expect("derive test UDP master key");
+
+            let accepted_connections_task = Arc::clone(&accepted_connections);
+            let received_requests_task = Arc::clone(&received_requests);
+            tokio::spawn(async move {
+                loop {
+                    let (stream, _) = match listener.accept().await {
+                        Ok(v) => v,
+                        Err(_) => break,
+                    };
+                    accepted_connections_task.fetch_add(1, Ordering::SeqCst);
+                    let master_key = master_key.clone();
+                    let received_requests = Arc::clone(&received_requests_task);
+                    tokio::spawn(async move {
+                        let _ = handle_udp_burst_ws_connection(
+                            stream,
+                            cipher,
+                            &master_key,
+                            burst_size,
+                            received_requests,
+                        )
+                        .await;
+                    });
+                }
+            });
+
+            Self {
+                addr,
+                accepted_connections,
+                received_requests,
+            }
+        }
+
+        fn url(&self) -> Url {
+            Url::parse(&format!("ws://{}/udp", self.addr)).expect("valid burst server URL")
+        }
+
+        fn accepted_connections(&self) -> usize {
+            self.accepted_connections.load(Ordering::SeqCst)
+        }
+
+        fn received_requests(&self) -> usize {
+            self.received_requests.load(Ordering::SeqCst)
+        }
+    }
+
+    async fn handle_udp_burst_ws_connection(
+        stream: TcpStream,
+        cipher: CipherKind,
+        master_key: &[u8],
+        burst_size: usize,
+        received_requests: Arc<AtomicUsize>,
+    ) -> Result<()> {
+        let mut ws = accept_async(stream).await.context("accept websocket")?;
+        while let Some(message) = ws.next().await {
+            match message.context("read websocket message")? {
+                Message::Binary(bytes) => {
+                    received_requests.fetch_add(1, Ordering::SeqCst);
+                    let payload =
+                        decrypt_udp_packet(cipher, master_key, &bytes).context("decrypt UDP frame")?;
+                    let (target, _) =
+                        TargetAddr::from_wire_bytes(&payload).context("parse UDP target")?;
+                    for index in 0..burst_size {
+                        let mut response = target.to_wire_bytes().context("encode UDP target")?;
+                        response.extend_from_slice(format!("reply-{index}").as_bytes());
+                        let encrypted = encrypt_udp_packet(cipher, master_key, &response)
+                            .context("encrypt UDP response")?;
+                        ws.send(Message::Binary(encrypted.into()))
+                            .await
+                            .context("send UDP burst response")?;
+                    }
+                    ws.close(None).await.context("close websocket")?;
+                    return Ok(());
+                }
+                Message::Ping(payload) => {
+                    ws.send(Message::Pong(payload))
+                        .await
+                        .context("send websocket pong")?;
+                }
+                Message::Close(_) => return Ok(()),
+                Message::Text(_) | Message::Pong(_) | Message::Frame(_) => {}
+            }
+        }
+        Ok(())
     }
 }

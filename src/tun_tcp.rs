@@ -33,6 +33,8 @@ use crate::uplink::{TransportKind, UplinkCandidate, UplinkManager};
 
 const DEFAULT_TCP_SEND_BUFFER_SIZE: usize = 0x4000 * 4;
 const DEFAULT_TCP_RECV_BUFFER_SIZE: usize = 0x4000 * 4;
+const MIN_PENDING_LOCAL_HANDSHAKES: usize = 32;
+const MAX_PENDING_LOCAL_HANDSHAKES: usize = 128;
 const FLOW_CLOSE_REASON_FINISHED: &str = "finished";
 const FLOW_CLOSE_REASON_CONNECT_FAILED: &str = "connect_failed";
 const FLOW_CLOSE_REASON_IO_ERROR: &str = "io_error";
@@ -83,6 +85,7 @@ struct TcpFlowHandle {
     uplink_name: Arc<StdMutex<Option<String>>>,
     created_at: Instant,
     last_activity_at: Arc<StdMutex<Instant>>,
+    task_abort_handle: Arc<StdMutex<Option<tokio::task::AbortHandle>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,16 +442,13 @@ impl TunTcpEngine {
         let manager_handle = {
             let manager_running = Arc::clone(&manager_running);
             let manager_started_at = std::time::Instant::now();
-            let socket_storage: &'static mut [SocketStorage<'static>] = Box::leak(
-                std::iter::repeat_with(SocketStorage::default)
-                    .take(max_flows.max(1))
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            );
             thread::Builder::new()
                 .name("outline-tun-smoltcp".to_owned())
                 .spawn(move || {
-                    let mut socket_set = SocketSet::new(socket_storage);
+                    let mut socket_storage = std::iter::repeat_with(SocketStorage::default)
+                        .take(max_flows.max(1))
+                        .collect::<Vec<_>>();
+                    let mut socket_set = SocketSet::new(socket_storage.as_mut_slice());
                     let mut sockets: HashMap<SocketHandle, SharedTcpConnectionControl> = HashMap::new();
                     let mut device = device_for_iface;
                     let mut iface = iface;
@@ -661,11 +661,14 @@ impl TunTcpEngine {
     }
 
     fn spawn_cleanup_loop(&self) {
-        let engine = self.clone();
+        let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
-                engine.cleanup_idle_flows().await;
+                let Some(inner) = inner.upgrade() else {
+                    break;
+                };
+                TunTcpEngine { inner }.cleanup_idle_flows().await;
             }
         });
     }
@@ -678,6 +681,28 @@ impl TunTcpEngine {
             }
             if flows.len() >= self.inner.max_flows {
                 bail!("TUN TCP flow table limit reached");
+            }
+            let pending_local_handshake_limit =
+                (self.inner.max_flows / 32).clamp(MIN_PENDING_LOCAL_HANDSHAKES, MAX_PENDING_LOCAL_HANDSHAKES);
+            let pending_local_handshakes = flows
+                .values()
+                .filter(|handle| {
+                    handle
+                        .uplink_name
+                        .lock()
+                        .expect("uplink_name poisoned")
+                        .is_none()
+                })
+                .count();
+            if pending_local_handshakes >= pending_local_handshake_limit {
+                warn!(
+                    client = %key.client,
+                    remote = %remote_addr,
+                    pending_local_handshakes,
+                    max_pending_local_handshakes = pending_local_handshake_limit,
+                    "dropping new TUN TCP flow while too many local smoltcp handshakes are pending"
+                );
+                bail!("too many pending local smoltcp TCP handshakes");
             }
         }
 
@@ -732,6 +757,7 @@ impl TunTcpEngine {
             uplink_name: Arc::new(StdMutex::new(None)),
             created_at: Instant::now(),
             last_activity_at: Arc::new(StdMutex::new(Instant::now())),
+            task_abort_handle: Arc::new(StdMutex::new(None)),
         };
         self.inner.flows.lock().await.insert(key.clone(), flow.clone());
         metrics::add_tun_tcp_flows_active("pending", 1);
@@ -746,7 +772,8 @@ impl TunTcpEngine {
         );
 
         let engine = self.clone();
-        tokio::spawn(async move {
+        let task_abort_handle = Arc::clone(&flow.task_abort_handle);
+        let task = tokio::spawn(async move {
             let result = engine.bridge_flow(key.clone(), remote_addr, connection, flow.clone()).await;
             let close_reason = match result {
                 Ok(()) => FLOW_CLOSE_REASON_FINISHED,
@@ -764,8 +791,11 @@ impl TunTcpEngine {
                     }
                 }
             };
-            engine.close_flow(&key, close_reason).await;
+            engine.close_flow(&key, close_reason, false).await;
         });
+        *task_abort_handle
+            .lock()
+            .expect("task_abort_handle poisoned") = Some(task.abort_handle());
 
         Ok(())
     }
@@ -777,11 +807,7 @@ impl TunTcpEngine {
         connection: TcpConnection,
         flow: TcpFlowHandle,
     ) -> Result<()> {
-        let local_handshake_timeout = self
-            .inner
-            .tcp
-            .handshake_timeout
-            .min(Duration::from_secs(3));
+        let local_handshake_timeout = self.inner.tcp.handshake_timeout;
         debug!(
             client = %key.client,
             remote = %remote_addr,
@@ -1050,15 +1076,26 @@ impl TunTcpEngine {
                 idle_timeout_ms = self.inner.idle_timeout.as_millis(),
                 "evicting idle TUN TCP flow"
             );
-            self.close_flow(&key, FLOW_CLOSE_REASON_EVICTED).await;
+            self.close_flow(&key, FLOW_CLOSE_REASON_EVICTED, true)
+                .await;
         }
     }
 
-    async fn close_flow(&self, key: &TcpFlowKey, reason: &'static str) {
+    async fn close_flow(&self, key: &TcpFlowKey, reason: &'static str, abort_task: bool) {
         let removed = self.inner.flows.lock().await.remove(key);
         let Some(handle) = removed else {
             return;
         };
+
+        if abort_task
+            && let Some(task_abort_handle) = handle
+                .task_abort_handle
+                .lock()
+                .expect("task_abort_handle poisoned")
+                .take()
+        {
+            task_abort_handle.abort();
+        }
 
         let uplink_name = handle
             .uplink_name
@@ -1283,4 +1320,145 @@ fn smol_now(started_at: std::time::Instant) -> SmolInstant {
     let elapsed = started_at.elapsed();
     let millis = elapsed.as_millis().min(i64::MAX as u128) as i64;
     SmolInstant::from_millis(millis)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::fs::OpenOptions;
+    use std::sync::atomic::AtomicBool;
+
+    use crate::config::{
+        LoadBalancingConfig, LoadBalancingMode, ProbeConfig, RoutingScope, TunTcpConfig,
+        UplinkConfig, WsProbeConfig,
+    };
+    use crate::metrics;
+    use crate::types::{CipherKind, UplinkTransport, WsTransportMode};
+
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn test_uplink_manager() -> UplinkManager {
+        UplinkManager::new(
+            vec![UplinkConfig {
+                name: "test".to_string(),
+                transport: UplinkTransport::Websocket,
+                tcp_ws_url: None,
+                tcp_ws_mode: WsTransportMode::Http1,
+                udp_ws_url: None,
+                udp_ws_mode: WsTransportMode::Http1,
+                tcp_addr: None,
+                udp_addr: None,
+                cipher: CipherKind::Aes256Gcm,
+                password: "password".to_string(),
+                weight: 1.0,
+                fwmark: None,
+                ipv6_first: false,
+            }],
+            ProbeConfig {
+                interval: Duration::from_secs(60),
+                timeout: Duration::from_secs(5),
+                max_concurrent: 1,
+                max_dials: 1,
+                min_failures: 1,
+                attempts: 1,
+                ws: WsProbeConfig { enabled: false },
+                http: None,
+                dns: None,
+            },
+            LoadBalancingConfig {
+                mode: LoadBalancingMode::ActivePassive,
+                routing_scope: RoutingScope::PerFlow,
+                sticky_ttl: Duration::from_secs(60),
+                hysteresis: Duration::from_millis(0),
+                failure_cooldown: Duration::from_secs(5),
+                warm_standby_tcp: 0,
+                warm_standby_udp: 0,
+                rtt_ewma_alpha: 0.5,
+                failure_penalty: Duration::from_millis(0),
+                failure_penalty_max: Duration::from_millis(0),
+                failure_penalty_halflife: Duration::from_secs(60),
+                h3_downgrade_duration: Duration::from_secs(60),
+                udp_ws_keepalive_interval: None,
+                tcp_ws_standby_keepalive_interval: None,
+                auto_failback: false,
+            },
+        )
+        .expect("test uplink manager")
+    }
+
+    fn test_engine(idle_timeout: Duration) -> TunTcpEngine {
+        let tun_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/null")
+            .expect("open /dev/null for test TUN writer");
+        let (manager_socket_creation_tx, _manager_socket_creation_rx) = mpsc::unbounded_channel();
+        TunTcpEngine {
+            inner: Arc::new(TunTcpEngineInner {
+                writer: SharedTunWriter::new(tokio::fs::File::from_std(tun_file)),
+                uplinks: test_uplink_manager(),
+                flows: tokio::sync::Mutex::new(HashMap::new()),
+                max_flows: 16,
+                idle_timeout,
+                tcp: TunTcpConfig {
+                    connect_timeout: Duration::from_secs(1),
+                    handshake_timeout: Duration::from_secs(1),
+                    half_close_timeout: Duration::from_secs(1),
+                    max_pending_server_bytes: DEFAULT_TCP_SEND_BUFFER_SIZE,
+                },
+                manager_socket_creation_tx,
+                manager_notify: Arc::new(ManagerNotify::new(thread::current())),
+                manager_running: Arc::new(AtomicBool::new(false)),
+                rx_queue: Arc::new(StdMutex::new(VecDeque::new())),
+                manager_handle: StdMutex::new(None),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_idle_flows_aborts_background_task() {
+        metrics::init();
+
+        let engine = test_engine(Duration::from_secs(1));
+        let key = TcpFlowKey {
+            client: "127.0.0.1:12345".parse().expect("client addr"),
+            remote: "1.1.1.1:443".parse().expect("remote addr"),
+        };
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_for_task = Arc::clone(&dropped);
+        let (started_tx, started_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _drop_signal = DropSignal(dropped_for_task);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.expect("background task started");
+        let flow = TcpFlowHandle {
+            uplink_name: Arc::new(StdMutex::new(Some("pending".to_string()))),
+            created_at: Instant::now() - Duration::from_secs(5),
+            last_activity_at: Arc::new(StdMutex::new(Instant::now() - Duration::from_secs(3))),
+            task_abort_handle: Arc::new(StdMutex::new(Some(task.abort_handle()))),
+        };
+        engine.inner.flows.lock().await.insert(key, flow);
+        drop(task);
+
+        engine.cleanup_idle_flows().await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            dropped.load(Ordering::Relaxed),
+            "idle TUN TCP cleanup must abort the background flow task"
+        );
+        assert!(
+            engine.inner.flows.lock().await.is_empty(),
+            "idle TUN TCP cleanup must remove the flow from the table"
+        );
+    }
 }

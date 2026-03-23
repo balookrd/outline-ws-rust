@@ -108,6 +108,8 @@ struct TcpSocketControl {
     established_waker: Option<Waker>,
     recv_state: TcpSocketState,
     send_state: TcpSocketState,
+    last_smoltcp_state: String,
+    last_smoltcp_tuple: Option<String>,
 }
 
 type SharedTcpConnectionControl = Arc<StdMutex<TcpSocketControl>>;
@@ -270,6 +272,8 @@ impl TcpConnection {
             established_waker: None,
             recv_state: TcpSocketState::Normal,
             send_state: TcpSocketState::Normal,
+            last_smoltcp_state: "Listen".to_string(),
+            last_smoltcp_tuple: None,
         }));
         let (socket_created_tx, socket_created_rx) = oneshot::channel();
         let _ = socket_creation_tx.send(TcpSocketCreation {
@@ -293,15 +297,35 @@ impl TcpConnection {
             if matches!(control.recv_state, TcpSocketState::Closed)
                 || matches!(control.send_state, TcpSocketState::Closed)
             {
+                let snapshot = format!(
+                    "last_state={} tuple={}",
+                    control.last_smoltcp_state,
+                    control
+                        .last_smoltcp_tuple
+                        .as_deref()
+                        .unwrap_or("unbound")
+                );
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::ConnectionAborted,
-                    "smoltcp connection closed before establishment",
+                    format!("smoltcp connection closed before establishment ({snapshot})"),
                 )));
             }
             control.established_waker = Some(cx.waker().clone());
             Poll::Pending
         })
         .await
+    }
+
+    fn handshake_debug_snapshot(&self) -> String {
+        let control = self.control.lock().expect("tcp control poisoned");
+        format!(
+            "last_state={} tuple={}",
+            control.last_smoltcp_state,
+            control
+                .last_smoltcp_tuple
+                .as_deref()
+                .unwrap_or("unbound")
+        )
     }
 }
 
@@ -473,6 +497,15 @@ impl TunTcpEngine {
                         for (&socket_handle, control) in &sockets {
                             let socket = socket_set.get_mut::<TcpSocket<'_>>(socket_handle);
                             let mut control = control.lock().expect("tcp control poisoned");
+                            control.last_smoltcp_state = format!("{:?}", socket.state());
+                            if let Some(local_endpoint) = socket.local_endpoint() {
+                                control.last_smoltcp_tuple = Some(match socket.remote_endpoint() {
+                                    Some(remote_endpoint) => {
+                                        format!("local={local_endpoint:?} remote={remote_endpoint:?}")
+                                    }
+                                    None => format!("local={local_endpoint:?} remote=unbound"),
+                                });
+                            }
 
                             if socket.state() == TcpState::Established && !control.established {
                                 control.established = true;
@@ -814,10 +847,15 @@ impl TunTcpEngine {
             handshake_timeout_ms = local_handshake_timeout.as_millis(),
             "waiting for local smoltcp TCP handshake"
         );
-        timeout(local_handshake_timeout, connection.wait_established())
-            .await
-            .context("timed out waiting for local smoltcp TCP handshake")?
-            .context("local smoltcp TCP handshake failed")?;
+        match timeout(local_handshake_timeout, connection.wait_established()).await {
+            Ok(result) => result.context("local smoltcp TCP handshake failed")?,
+            Err(_) => {
+                bail!(
+                    "timed out waiting for local smoltcp TCP handshake ({})",
+                    connection.handshake_debug_snapshot()
+                );
+            }
+        }
         info!(
             client = %key.client,
             remote = %remote_addr,
